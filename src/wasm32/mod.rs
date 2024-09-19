@@ -1,4 +1,4 @@
-pub use std::thread::{current, sleep, Result, Thread, ThreadId};
+pub use std::thread::{Result, Thread};
 use std::{
     cell::UnsafeCell,
     fmt,
@@ -13,7 +13,7 @@ use scoped::ScopeData;
 pub use scoped::{scope, Scope, ScopedJoinHandle};
 use signal::Signal;
 use utils::SpinLockMutex;
-pub use utils::{available_parallelism, get_wasm_bindgen_shim_script_path, get_worker_script, is_web_worker_thread};
+pub use utils::{available_parallelism, get_wasm_bindgen_shim_script_path, is_web_worker_thread};
 use wasm_bindgen::prelude::*;
 use web_sys::{DedicatedWorkerGlobalScope, Worker, WorkerOptions, WorkerType};
 
@@ -57,8 +57,7 @@ impl WorkerMessage {
     pub fn post(self) {
         let req = Box::new(self);
 
-        js_sys::eval("self")
-            .unwrap()
+        js_sys::global()
             .dyn_into::<DedicatedWorkerGlobalScope>()
             .unwrap()
             .post_message(&JsValue::from(Box::into_raw(req) as u32))
@@ -276,37 +275,27 @@ impl Builder {
             ..
         } = self;
 
-        // Get worker script as URL encoded blob
-        let script = worker_script_url.unwrap_or(get_worker_script(wasm_bindgen_shim_url));
+        let wasm_bindgen_shim_url = wasm_bindgen_shim_url.unwrap_or_else(get_wasm_bindgen_shim_script_path);
 
         // Todo: figure out how to set stack size
-        let mut options = WorkerOptions::new();
+        let options = WorkerOptions::new();
         match (name, prefix) {
-            (Some(name), Some(prefix)) => {
-                options.name(&format!("{}:{}", prefix, name));
-            }
-            (Some(name), None) => {
-                options.name(&name);
-            }
+            (Some(name), Some(prefix)) => options.set_name(&format!("{}:{}", prefix, name)),
+            (Some(name), None) => options.set_name(&name),
             (None, Some(prefix)) => {
                 let random = (js_sys::Math::random() * 10e10) as u64;
-                options.name(&format!("{}:{}", prefix, random));
+                options.set_name(&format!("{}:{}", prefix, random));
             }
-            (None, None) => {}
+            (None, None) => (),
         };
 
-        #[cfg(feature = "es_modules")]
-        {
-            utils::load_module_workers_polyfill();
-            options.type_(WorkerType::Module);
-        }
-        #[cfg(not(feature = "es_modules"))]
-        {
-            options.type_(WorkerType::Classic);
-        }
+        options.set_type(WorkerType::Module);
 
         // Spawn the worker
-        let worker = Rc::new(Worker::new_with_options(script.as_str(), &options).unwrap());
+        let worker = Rc::new(Worker::new_with_options(
+            worker_script_url.unwrap_or_else(|| wasm_bindgen::link_to!(module = "/src/wasm32/js/web_worker_module.js")).as_str(),
+            &options,
+        ).unwrap());
 
         // Make copy and keep a reference in callback handler so that GC does not despawn worker
         let mut their_worker = Some(worker.clone());
@@ -334,6 +323,7 @@ impl Builder {
 
         // Pack shared wasm (module and memory) and work as a single JS array
         let init = js_sys::Array::new();
+        init.push(&wasm_bindgen_shim_url.into());
         init.push(&wasm_bindgen::module());
         init.push(&wasm_bindgen::memory());
         init.push(&JsValue::from(ctx_ptr as u32));
