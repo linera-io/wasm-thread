@@ -9,7 +9,7 @@ self.onmessage = event => {
             const wasm = await (await import(url)).initSync({ module, memory });
             // Enter rust code by calling entry point defined in `lib.rs`.
             // This executes closure defined by work context.
-            wasm.wasm_thread_entry_point(work);
+            await wasm.wasm_thread_entry_point(work);
         } catch (err) {
             console.log(err);
 
