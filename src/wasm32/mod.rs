@@ -150,22 +150,8 @@ pub async fn wasm_thread_entry_point(ptr: u32) {
     WorkerMessage::ThreadComplete.post();
 }
 
-/// Used to relay spawn requests from web workers to main thread
-struct BuilderRequest {
-    builder: Builder,
-    context: WebWorkerContext,
-}
-
-impl BuilderRequest {
-    pub unsafe fn spawn(self) {
-        self.builder.spawn_for_context(self.context);
-    }
-}
-
 /// Web worker to main thread messages
 enum WorkerMessage {
-    /// Request to spawn thread
-    SpawnThread(BuilderRequest),
     /// Thread has completed execution
     ThreadComplete,
 }
@@ -264,7 +250,7 @@ impl Builder {
 
     /// Spawns a new thread by taking ownership of the `Builder`, and returns an
     /// [std::io::Result] to its [`JoinHandle`].
-    pub fn spawn<Fut>(self, f: impl FnOnce() -> Fut + Send + 'static) -> std::io::Result<JoinHandle<Fut::Output>>
+    pub fn spawn<Fut>(self, f: impl FnOnce() -> Fut + Send + 'static) -> std::io::Result<(Rc<Worker>, JoinHandle<Fut::Output>)>
     where
         Fut: Future<Output: Send + 'static> + 'static,
     {
@@ -285,41 +271,41 @@ impl Builder {
     /// - use only types with `'static` lifetime bounds, i.e., those with no or only
     /// `'static` references (both [`Builder::spawn`]
     /// and [`spawn`] enforce this property statically)
-    pub unsafe fn spawn_unchecked<'a, Fut>(self, f: impl FnOnce() -> Fut + Send + 'static) -> std::io::Result<JoinHandle<Fut::Output>>
+    pub unsafe fn spawn_unchecked<'a, Fut>(self, f: impl FnOnce() -> Fut + Send + 'static) -> std::io::Result<(Rc<Worker>, JoinHandle<Fut::Output>)>
     where
         Fut: Future<Output: Send + 'a> + 'a,
     {
-        Ok(JoinHandle(unsafe { self.spawn_unchecked_(f, None) }?))
+        let (worker, join_handle) = unsafe { self.spawn_unchecked_(f, None) }?;
+        Ok((worker, JoinHandle(join_handle)))
     }
 
     pub(crate) unsafe fn spawn_unchecked_<'a, 'scope, Fut>(
         self,
         f: impl FnOnce() -> Fut + Send + 'a,
         scope_data: Option<Arc<ScopeData>>,
-    ) -> std::io::Result<JoinInner<'scope, Fut::Output>>
+    ) -> std::io::Result<(Rc<Worker>, JoinInner<'scope, Fut::Output>)>
     where
         Fut: Future<Output: Send + 'a> + 'a,
         'scope: 'a,
     {
         let (context, my_signal, my_packet) = WebWorkerContext::new(f, scope_data);
 
-        if is_web_worker_thread() {
-            WorkerMessage::SpawnThread(BuilderRequest { builder: self, context }).post();
-        } else {
-            self.spawn_for_context(context);
-        }
+        let worker = self.spawn_for_context(context);
 
         if let Some(scope) = &my_packet.scope {
             scope.increment_num_running_threads();
         }
 
-        Ok(JoinInner {
-            signal: my_signal,
-            packet: my_packet,
-        })
+        Ok((
+            worker,
+            JoinInner {
+                signal: my_signal,
+                packet: my_packet,
+            },
+        ))
     }
 
-    unsafe fn spawn_for_context(self, ctx: WebWorkerContext) {
+    unsafe fn spawn_for_context(self, ctx: WebWorkerContext) -> Rc<Worker> {
         let Builder {
             name,
             prefix,
@@ -358,9 +344,6 @@ impl Builder {
             let req = Box::from_raw(x.data().as_f64().unwrap() as u32 as *mut WorkerMessage);
 
             match *req {
-                WorkerMessage::SpawnThread(builder) => {
-                    builder.spawn();
-                }
                 WorkerMessage::ThreadComplete => {
                     // Drop worker reference so it can be cleaned up by GC
                     their_worker.take();
@@ -389,7 +372,7 @@ impl Builder {
                 Err(e)
             }
         }
-        .unwrap();
+        .unwrap()
     }
 }
 
@@ -495,13 +478,5 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    Builder::new().spawn(|| async move { f() }).expect("failed to spawn thread")
-}
-
-/// Spawns a new thread, returning a JoinHandle for it.
-pub fn spawn_async<Fut>(f: impl FnOnce() -> Fut + Send + 'static) -> JoinHandle<Fut::Output>
-where
-    Fut: Future<Output: Send + 'static> + 'static,
-{
-    Builder::new().spawn(f).expect("failed to spawn thread")
+    Builder::new().spawn(|| async move { f() }).expect("failed to spawn thread").1
 }
