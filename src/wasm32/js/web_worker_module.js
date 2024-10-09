@@ -7,11 +7,14 @@ self.onmessage = event => {
     (async () => {
         try {
             const wasm = await (await import(url)).initSync({ module, memory });
+            console.log('Wasm initialized');
             // Enter rust code by calling entry point defined in `lib.rs`.
             // This executes closure defined by work context.
             await wasm.wasm_thread_entry_point(work);
+
+            console.log('Work completed successfully');
         } catch (err) {
-            console.log(err);
+            console.error(err);
 
             // Propagate to main `onerror`:
             setTimeout(() => {
@@ -20,6 +23,8 @@ self.onmessage = event => {
             // Rethrow to keep promise rejected and prevent execution of further commands:
             throw err;
         }
+
+        console.log('Closing worker');
 
         // Once done, terminate web worker
         close();

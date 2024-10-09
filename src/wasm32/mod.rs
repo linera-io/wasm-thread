@@ -1,4 +1,4 @@
-pub use std::thread::{Result, Thread};
+pub use std::thread::Result;
 use futures::FutureExt as _;
 use std::{
     cell::UnsafeCell,
@@ -28,6 +28,8 @@ use web_sys::{DedicatedWorkerGlobalScope, Worker, WorkerOptions, WorkerType};
 // mod scoped;
 mod signal;
 mod utils;
+
+pub type Thread = Rc<Worker>;
 
 pub(crate) struct ScopeData {
     num_running_threads: AtomicUsize,
@@ -250,7 +252,7 @@ impl Builder {
 
     /// Spawns a new thread by taking ownership of the `Builder`, and returns an
     /// [std::io::Result] to its [`JoinHandle`].
-    pub fn spawn<Fut>(self, f: impl FnOnce() -> Fut + Send + 'static) -> std::io::Result<(Rc<Worker>, JoinHandle<Fut::Output>)>
+    pub fn spawn<Fut>(self, f: impl FnOnce() -> Fut + Send + 'static) -> std::io::Result<JoinHandle<Fut::Output>>
     where
         Fut: Future<Output: Send + 'static> + 'static,
     {
@@ -271,19 +273,19 @@ impl Builder {
     /// - use only types with `'static` lifetime bounds, i.e., those with no or only
     /// `'static` references (both [`Builder::spawn`]
     /// and [`spawn`] enforce this property statically)
-    pub unsafe fn spawn_unchecked<'a, Fut>(self, f: impl FnOnce() -> Fut + Send + 'static) -> std::io::Result<(Rc<Worker>, JoinHandle<Fut::Output>)>
+    pub unsafe fn spawn_unchecked<'a, Fut>(self, f: impl FnOnce() -> Fut + Send + 'static) -> std::io::Result<JoinHandle<Fut::Output>>
     where
         Fut: Future<Output: Send + 'a> + 'a,
     {
         let (worker, join_handle) = unsafe { self.spawn_unchecked_(f, None) }?;
-        Ok((worker, JoinHandle(join_handle)))
+        Ok(JoinHandle { worker, join_handle })
     }
 
     pub(crate) unsafe fn spawn_unchecked_<'a, 'scope, Fut>(
         self,
         f: impl FnOnce() -> Fut + Send + 'a,
         scope_data: Option<Arc<ScopeData>>,
-    ) -> std::io::Result<(Rc<Worker>, JoinInner<'scope, Fut::Output>)>
+    ) -> std::io::Result<(Thread, JoinInner<'scope, Fut::Output>)>
     where
         Fut: Future<Output: Send + 'a> + 'a,
         'scope: 'a,
@@ -305,7 +307,7 @@ impl Builder {
         ))
     }
 
-    unsafe fn spawn_for_context(self, ctx: WebWorkerContext) -> Rc<Worker> {
+    unsafe fn spawn_for_context(self, ctx: WebWorkerContext) -> Thread {
         let Builder {
             name,
             prefix,
@@ -446,23 +448,25 @@ impl<'scope, T> JoinInner<'scope, T> {
 }
 
 /// An owned permission to join on a thread (block on its termination).
-pub struct JoinHandle<T>(JoinInner<'static, T>);
+pub struct JoinHandle<T> {
+    worker: Thread,
+    join_handle: JoinInner<'static, T>,
+}
 
 impl<T> JoinHandle<T> {
     /// Extracts a handle to the underlying thread.
     pub fn thread(&self) -> &Thread {
-        unimplemented!();
-        //&self.0.thread
+        &self.worker
     }
 
     /// Waits for the associated thread to finish.
     pub fn join(self) -> Result<T> {
-        self.0.join()
+        self.join_handle.join()
     }
 
     /// Waits for the associated thread to finish asynchronously.
     pub async fn join_async(self) -> Result<T> {
-        self.0.join_async().await
+        self.join_handle.join_async().await
     }
 }
 
@@ -478,5 +482,5 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    Builder::new().spawn(|| async move { f() }).expect("failed to spawn thread").1
+    Builder::new().spawn(|| async move { f() }).expect("failed to spawn thread")
 }
