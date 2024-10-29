@@ -1,27 +1,28 @@
-// synchronously, using the browser, import wasm_bindgen shim JS scripts
-import init, {wasm_thread_entry_point} from "WASM_BINDGEN_SHIM_URL";
-
 // Wait for the main thread to send us the shared module/memory and work context.
 // Once we've got it, initialize it all with the `wasm_bindgen` global we imported via
 // `importScripts`.
 self.onmessage = event => {
-    let [ module, memory, work ] = event.data;
+    let [ url, module, memory, work ] = event.data;
 
-    init(module, memory).catch(err => {
-        console.log(err);
+    (async () => {
+        try {
+            const wasm = await import(url);
+            wasm.initSync({ module, memory });
+            // Enter rust code by calling entry point defined in `lib.rs`.
+            // This executes closure defined by work context.
+            await wasm.wasm_thread_entry_point(work);
+        } catch (err) {
+            console.error(err);
 
-        // Propagate to main `onerror`:
-        setTimeout(() => {
+            // Propagate to main `onerror`:
+            setTimeout(() => {
+                throw err;
+            });
+            // Rethrow to keep promise rejected and prevent execution of further commands:
             throw err;
-        });
-        // Rethrow to keep promise rejected and prevent execution of further commands:
-        throw err;
-    }).then(() => {
-        // Enter rust code by calling entry point defined in `lib.rs`.
-        // This executes closure defined by work context.
-        wasm_thread_entry_point(work);
+        }
 
         // Once done, terminate web worker
         close();
-    });
+    })();
 };
