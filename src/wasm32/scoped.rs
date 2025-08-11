@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use super::{signal::Signal, utils::is_web_worker_thread, Builder, JoinInner};
+use super::{signal::Signal, utils::is_web_worker_thread, Builder, JoinInner, ScopeData};
 
 /// A scope to spawn scoped threads in.
 ///
@@ -35,35 +35,6 @@ pub struct Scope<'scope, 'env: 'scope> {
 ///
 /// See [`Scope::spawn`] for details.
 pub struct ScopedJoinHandle<'scope, T>(JoinInner<'scope, T>);
-
-pub(crate) struct ScopeData {
-    num_running_threads: AtomicUsize,
-    a_thread_panicked: AtomicBool,
-    signal: Signal,
-}
-
-impl ScopeData {
-    pub(crate) fn increment_num_running_threads(&self) {
-        // We check for 'overflow' with usize::MAX / 2, to make sure there's no
-        // chance it overflows to 0, which would result in unsoundness.
-        if self.num_running_threads.fetch_add(1, Ordering::Relaxed) > usize::MAX / 2 {
-            // This can only reasonably happen by mem::forget()'ing a lot of ScopedJoinHandles.
-            self.decrement_num_running_threads(false);
-            panic!("too many running threads in thread scope");
-        }
-    }
-
-    pub(crate) fn decrement_num_running_threads(&self, panic: bool) {
-        if panic {
-            self.a_thread_panicked.store(true, Ordering::Relaxed);
-        }
-
-        if self.num_running_threads.fetch_sub(1, Ordering::Release) == 1 {
-            // All threads have terminated
-            self.signal.signal();
-        }
-    }
-}
 
 /// Create a scope for spawning scoped threads.
 ///
@@ -172,7 +143,7 @@ impl Builder {
         T: Send + 'scope,
     {
         Ok(ScopedJoinHandle(unsafe {
-            self.spawn_unchecked_(f, Some(scope.data.clone()))
+            self.spawn_unchecked_(f, Some(scope.data.clone())).1
         }?))
     }
 }
